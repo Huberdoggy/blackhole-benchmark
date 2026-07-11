@@ -27,20 +27,29 @@ from typing import Any
 
 import websocket
 
-
 SWARM_API_URL = "http://localhost:7801"
 SWARM_OUTPUT_DIR = Path("/home/huberdoggy/projects/SwarmUI/Output/raw")
 STAGING_DIR = Path("./src/assets/staging/")
 BACKLOG_PATH = Path("render_backlog.md")
 MODEL_PATH = Path("/home/huberdoggy/shared_os/swarm_models/diffusion_models/z_image_turbo-Q6_K.gguf")
 MODEL_NAME = "z_image_turbo-Q6_K.gguf"
+VAE_PATH = Path("/home/huberdoggy/shared_os/swarm_models/VAE/Flux/UltraFlux-vae.safetensors")
+VAE_NAME = "Flux/UltraFlux-vae"
+QWEN_ENCODER_PATH = Path("/home/huberdoggy/shared_os/swarm_models/text_encoders/Qwen3-4B-UD-Q6_K_XL.gguf")
+QWEN_MODEL_NAME = "Qwen3-4B-UD-Q6_K_XL.gguf"
 
 CFG_SCALE = 1.0
 STEPS = 8
 IMAGES_PER_TASK = 1
 REQUEST_TIMEOUT_SECONDS = 900
 WS_RECV_TIMEOUT_SECONDS = 10
-WS_PROGRESS_TIMEOUT_SECONDS = 90
+WS_PROGRESS_TIMEOUT_SECONDS = 300
+SMOKE_TEST_SEED = 424242
+SMOKE_TEST_PROMPT = (
+    "Centered relativistic black hole singularity, luminous rotational photon halo, smooth gravitational lensing arcs, "
+    "dense pin-sharp starfield, blue-white hot rim with amber plasma undertones, scientific cinematic realism, crisp "
+    "high-contrast 1024 square benchmark asset."
+)
 
 
 PROMPT_BY_COMPONENT = {
@@ -76,9 +85,7 @@ SIZE_BY_COMPONENT = {
 }
 
 
-NEGATIVE_PROMPT = (
-    "blurry, low resolution, cartoon, anime, flat colors, compression artifacts"
-)
+NEGATIVE_PROMPT = "blurry, low resolution, cartoon, anime, flat colors, compression artifacts"
 
 
 @dataclass(frozen=True)
@@ -171,12 +178,19 @@ class SwarmClient:
         return data
 
     def _generate_ws_once(self, payload: dict[str, Any]) -> list[str]:
+        socket = self._open_generation_socket()
+        try:
+            return self._collect_ws_images(socket, payload)
+        finally:
+            socket.close()
+
+    def _open_generation_socket(self) -> websocket.WebSocket:
         ws_url = self._ws_url("/API/GenerateText2ImageWS")
         headers = []
         if self.auth_token:
             headers.append(f"Cookie: swarm_token={self.auth_token}")
         try:
-            socket = websocket.create_connection(
+            return websocket.create_connection(
                 ws_url,
                 timeout=WS_RECV_TIMEOUT_SECONDS,
                 header=headers,
@@ -185,6 +199,8 @@ class SwarmClient:
             )
         except Exception as exc:
             raise SwarmAPIError(f"Could not open SwarmUI websocket at {ws_url}: {exc}") from exc
+
+    def _collect_ws_images(self, socket: websocket.WebSocket, payload: dict[str, Any]) -> list[str]:
         images: list[str] = []
         last_progress = time.monotonic()
         last_event: dict[str, Any] | None = None
@@ -201,29 +217,40 @@ class SwarmClient:
                     break
                 event = json.loads(raw)
                 last_event = event
-                if event.get("keep_alive") is True:
+                image_ref = self._handle_ws_event(event)
+                if image_ref == "__KEEP_ALIVE__":
                     continue
                 last_progress = time.monotonic()
-                if event.get("error_id") == "invalid_session_id":
+                if image_ref == "__INVALID_SESSION__":
                     return ["__INVALID_SESSION__"]
-                if "error" in event:
-                    raise SwarmAPIError(str(event["error"]))
-                if "image" in event:
-                    image_ref = event["image"].get("image") if isinstance(event["image"], dict) else event["image"]
-                    if image_ref:
-                        images.append(str(image_ref))
-                        return images
-                if event.get("socket_intention") == "close":
+                if image_ref == "__CLOSE__":
                     break
+                if image_ref:
+                    images.append(image_ref)
+                    return images
         except SwarmAPIError:
             raise
         except Exception as exc:
             raise SwarmAPIError(f"SwarmUI websocket generation failed: {exc}") from exc
-        finally:
-            socket.close()
         if not images:
             raise SwarmAPIError("GenerateText2ImageWS closed without returning an image.")
         return images
+
+    @staticmethod
+    def _handle_ws_event(event: dict[str, Any]) -> str | None:
+        if event.get("keep_alive") is True:
+            return "__KEEP_ALIVE__"
+        if event.get("error_id") == "invalid_session_id":
+            return "__INVALID_SESSION__"
+        if "error" in event:
+            raise SwarmAPIError(str(event["error"]))
+        if "image" in event:
+            image = event["image"]
+            image_ref = image.get("image") if isinstance(image, dict) else image
+            return str(image_ref) if image_ref else None
+        if event.get("socket_intention") == "close":
+            return "__CLOSE__"
+        return None
 
     def download_or_copy(self, image_ref: str, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -323,11 +350,49 @@ def build_payload(task: RenderTask, seed: int) -> dict[str, Any]:
     }
 
 
+def build_swarm_smoke_payload(explicit_models: bool) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "images": 1,
+        "prompt": SMOKE_TEST_PROMPT,
+        "negativeprompt": NEGATIVE_PROMPT,
+        "model": MODEL_NAME,
+        "width": 1024,
+        "height": 1024,
+        "cfgscale": CFG_SCALE,
+        "steps": STEPS,
+        "seed": SMOKE_TEST_SEED,
+        "extra_metadata": json.dumps(
+            {
+                "asset_task_id": "BH-SWARM-SMOKE-1024",
+                "asset_component": "SwarmUI 1024 nomenclature smoke test",
+                "handoff": "physics_sandbox/src/assets/staging",
+                "explicit_models": explicit_models,
+            }
+        ),
+    }
+    if explicit_models:
+        payload.update(
+            {
+                "vae": VAE_NAME,
+                "qwenmodel": QWEN_MODEL_NAME,
+            }
+        )
+    return payload
+
+
 def verify_environment() -> None:
     if not BACKLOG_PATH.exists():
         raise FileNotFoundError(f"Backlog not found: {BACKLOG_PATH}")
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+
+
+def verify_smoke_environment() -> None:
+    verify_environment()
+    if not VAE_PATH.exists():
+        raise FileNotFoundError(f"VAE file not found: {VAE_PATH}")
+    if not QWEN_ENCODER_PATH.exists():
+        raise FileNotFoundError(f"Qwen text encoder file not found: {QWEN_ENCODER_PATH}")
 
 
 def run(dry_run: bool, api_url: str) -> int:
@@ -381,9 +446,54 @@ def run(dry_run: bool, api_url: str) -> int:
     return 0
 
 
+def run_swarm_smoke_test(dry_run: bool, api_url: str) -> int:
+    verify_smoke_environment()
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    print("Running 1024x1024 SwarmUI nomenclature smoke test.", flush=True)
+    print(f"VAE parameter: vae={VAE_NAME} ({VAE_PATH})", flush=True)
+    print(f"Qwen parameter: qwenmodel={QWEN_MODEL_NAME} ({QWEN_ENCODER_PATH})", flush=True)
+
+    client = None if dry_run else SwarmClient(api_url, os.environ.get("SWARM_AUTH_TOKEN"))
+    manifest: list[dict[str, Any]] = []
+    variants = [
+        ("auto", build_swarm_smoke_payload(explicit_models=False)),
+        ("explicit", build_swarm_smoke_payload(explicit_models=True)),
+    ]
+
+    for variant, payload in variants:
+        destination = STAGING_DIR / f"swarm_smoke_{variant}_1024.png"
+        manifest.append(
+            {
+                "variant": variant,
+                "filename": destination.name,
+                "payload": payload,
+                "success_criteria": "Valid centered 1024x1024 black hole halo asset with sharp starfield.",
+            }
+        )
+        print(f"[{variant}] 1024x1024 -> {destination}", flush=True)
+        if dry_run:
+            continue
+        assert client is not None
+        images = client.generate(payload)
+        client.download_or_copy(images[0], destination)
+        print(f"    staged {destination}", flush=True)
+
+    manifest_path = STAGING_DIR / "swarm_smoke_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Wrote smoke-test manifest: {manifest_path}", flush=True)
+    if dry_run:
+        print("Dry run only; no SwarmUI generation requests were sent.", flush=True)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and stage SwarmUI assets from render_backlog.md.")
     parser.add_argument("--dry-run", action="store_true", help="Validate backlog and write payload manifest only.")
+    parser.add_argument(
+        "--swarm-smoke-test",
+        action="store_true",
+        help="Run the 1024x1024 auto-vs-explicit VAE/Qwen nomenclature smoke test.",
+    )
     parser.add_argument(
         "--api-url",
         default=os.environ.get("SWARM_API_URL", SWARM_API_URL),
@@ -391,6 +501,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
+        if args.swarm_smoke_test:
+            return run_swarm_smoke_test(dry_run=args.dry_run, api_url=args.api_url)
         return run(dry_run=args.dry_run, api_url=args.api_url)
     except Exception as exc:
         print(f"orchestrator.py: error: {exc}", file=sys.stderr)

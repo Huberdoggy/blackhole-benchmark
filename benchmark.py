@@ -15,6 +15,7 @@ import math
 import statistics
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,6 @@ import dearpygui.dearpygui as dpg
 import moderngl
 import numpy as np
 import pygame
-
 
 BENCHMARK_TIERS = [
     ("720p", 1280, 720, 10.0, 1.0),
@@ -124,6 +124,20 @@ mat3 lookAt(vec3 ro, vec3 target) {
     return mat3(r, u, f);
 }
 
+mat2 rot2(float a) {
+    float s = sin(a);
+    float c = cos(a);
+    return mat2(c, -s, s, c);
+}
+
+vec2 swirlUV(vec2 uv, float spin, float shear) {
+    vec2 q = uv - 0.5;
+    float r = max(length(q), 0.001);
+    float angle = spin + shear / (r * 1.9 + 0.08);
+    q = rot2(angle) * q;
+    return q + 0.5;
+}
+
 void main() {
     vec2 p = (gl_FragCoord.xy * 2.0 - u_resolution.xy) / u_resolution.y;
     vec3 ro = u_camera_pos;
@@ -166,7 +180,11 @@ void main() {
                 vec3 tangent = normalize(vec3(-hit.z, 0.0, hit.x));
                 float doppler = dot(tangent, normalize(ro - hit));
                 float beam = pow(max(0.12, 1.0 + 0.72 * doppler), 2.5);
-                vec3 doppler_tint = mix(vec3(1.18, 0.18, 0.04), vec3(0.42, 0.76, 1.95), smoothstep(-0.55, 0.65, doppler));
+                vec3 doppler_tint = mix(
+                    vec3(1.18, 0.18, 0.04),
+                    vec3(0.42, 0.76, 1.95),
+                    smoothstep(-0.55, 0.65, doppler)
+                );
                 float theta = atan(hit.z, hit.x) / (2.0 * PI) + 0.5;
                 vec2 disk_uv = vec2(fract(theta + u_time * 0.018), radial);
                 vec3 disk_plate = texture(u_disk_tex, disk_uv).rgb;
@@ -195,9 +213,19 @@ void main() {
     color = mix(color, disk_accum + color * (1.0 - disk_alpha), clamp(disk_alpha, 0.0, 1.0));
 
     float photon = exp(-abs(min_r - schwarzschild * 1.48) * 14.0);
-    vec2 horizon_uv = p / max(3.25, schwarzschild * 1.25) + 0.5;
-    vec3 singularity_plate = texture(u_singularity_tex, clamp(horizon_uv, vec2(0.0), vec2(1.0))).rgb;
-    float horizon_mask = smoothstep(0.72, 0.0, length(horizon_uv - 0.5));
+    vec2 horizon_base = p / max(3.25, schwarzschild * 1.25) + 0.5;
+    float r_halo = length(horizon_base - 0.5);
+    vec2 inner_uv = swirlUV(horizon_base, u_time * 0.10, 0.18);
+    vec2 outer_uv = swirlUV(horizon_base, -u_time * 0.035, -0.08);
+    vec3 singularity_inner = texture(u_singularity_tex, clamp(inner_uv, vec2(0.0), vec2(1.0))).rgb;
+    vec3 singularity_outer = texture(u_singularity_tex, clamp(outer_uv, vec2(0.0), vec2(1.0))).rgb;
+    vec3 singularity_plate = mix(singularity_outer, singularity_inner, smoothstep(0.62, 0.18, r_halo));
+    float halo_angle = atan(horizon_base.y - 0.5, horizon_base.x - 0.5);
+    float rotational_lobe = sin(halo_angle + u_time * 0.45);
+    vec3 blue_boost = vec3(0.55, 0.78, 1.35);
+    vec3 red_falloff = vec3(1.25, 0.46, 0.18);
+    singularity_plate *= mix(red_falloff, blue_boost, smoothstep(-0.45, 0.65, rotational_lobe));
+    float horizon_mask = smoothstep(0.72, 0.0, r_halo);
     color = mix(color, color * 0.72 + singularity_plate * 0.66, horizon_mask * 0.45);
     color += (vec3(1.0, 0.62, 0.20) + singularity_plate * 0.45) * photon * 0.23;
 
@@ -244,16 +272,29 @@ class SharedState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+@dataclass(frozen=True)
+class SliderVisual:
+    label: str
+    slider_tag: str
+    draw_tag: str
+    value_tag: str
+    minimum: float
+    maximum: float
+    lamp_color: tuple[int, int, int, int]
+
+
 class HudThread(threading.Thread):
     def __init__(self, state: SharedState) -> None:
         super().__init__(daemon=True)
         self.state = state
+        self.slider_visuals: list[SliderVisual] = []
 
     def run(self) -> None:
         dpg.create_context()
         dpg.bind_theme(self._build_theme())
-        with dpg.window(label="Black Hole Diagnostics", tag="hud_window", width=430, height=500):
+        with dpg.window(label="Black Hole Diagnostics", tag="hud_window", width=430, height=620):
             dpg.add_drawlist(width=392, height=126, tag="hud_scope")
+            dpg.add_drawlist(width=392, height=92, tag="hud_gauges")
             dpg.add_spacer(height=3)
             with dpg.group(horizontal=True):
                 dpg.add_text("FPS", color=(85, 226, 255, 255))
@@ -268,27 +309,69 @@ class HudThread(threading.Thread):
                 dpg.add_text("MODE", color=(255, 176, 77, 255))
                 dpg.add_text("Interactive", tag="tier_text")
             dpg.add_separator()
-            with dpg.child_window(height=72, border=True):
+            with dpg.child_window(height=96, border=True):
                 dpg.add_text("BLACK HOLE", color=(85, 226, 255, 255))
-                self._add_slider_row("Mass", "mass_value", 4.0, 0.6, 12.0, self._set_mass)
-            with dpg.child_window(height=96, border=True):
+                self._add_slider_row(
+                    "Mass",
+                    "mass_value",
+                    4.0,
+                    0.6,
+                    12.0,
+                    self._set_mass,
+                    (89, 226, 255, 255),
+                )
+            with dpg.child_window(height=128, border=True):
                 dpg.add_text("ACCRETION DISK", color=(255, 176, 77, 255))
-                self._add_slider_row("Inner", "inner_value", 1.55, 0.55, 4.5, self._set_inner)
-                self._add_slider_row("Outer", "outer_value", 7.3, 3.5, 14.0, self._set_outer)
-            with dpg.child_window(height=96, border=True):
+                self._add_slider_row(
+                    "Inner",
+                    "inner_value",
+                    1.55,
+                    0.55,
+                    4.5,
+                    self._set_inner,
+                    (255, 178, 78, 255),
+                )
+                self._add_slider_row(
+                    "Outer",
+                    "outer_value",
+                    7.3,
+                    3.5,
+                    14.0,
+                    self._set_outer,
+                    (255, 106, 64, 255),
+                )
+            with dpg.child_window(height=128, border=True):
                 dpg.add_text("CAMERA", color=(85, 226, 255, 255))
-                self._add_slider_row("Distance", "camera_distance_value", 11.0, 4.0, 24.0, self._set_camera_distance)
-                self._add_slider_row("Height", "camera_height_value", 2.25, -6.0, 8.0, self._set_camera_height)
+                self._add_slider_row(
+                    "Distance",
+                    "camera_distance_value",
+                    11.0,
+                    4.0,
+                    24.0,
+                    self._set_camera_distance,
+                    (89, 226, 255, 255),
+                )
+                self._add_slider_row(
+                    "Height",
+                    "camera_height_value",
+                    2.25,
+                    -6.0,
+                    8.0,
+                    self._set_camera_height,
+                    (180, 232, 214, 255),
+                )
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Run Benchmark", width=185, callback=self._request_benchmark)
                 dpg.add_button(label="Quit", width=90, callback=self._request_quit)
 
-        with dpg.window(label="Benchmark Complete", modal=True, show=False, tag="score_modal", no_resize=True, width=390, height=210):
+        with dpg.window(
+            label="Benchmark Complete", modal=True, show=False, tag="score_modal", no_resize=True, width=390, height=210
+        ):
             dpg.add_text("", tag="score_text")
             dpg.add_button(label="Close", callback=lambda: dpg.configure_item("score_modal", show=False))
 
-        dpg.create_viewport(title="Black Hole Benchmark HUD", width=460, height=540)
+        dpg.create_viewport(title="Black Hole Benchmark HUD", width=460, height=680)
         dpg.setup_dearpygui()
         dpg.show_viewport()
 
@@ -304,12 +387,23 @@ class HudThread(threading.Thread):
                     score=self.state.metrics.score,
                     tier_results=dict(self.state.metrics.tier_results),
                 )
+                controls = Controls(
+                    mass=self.state.controls.mass,
+                    disk_inner=self.state.controls.disk_inner,
+                    disk_outer=self.state.controls.disk_outer,
+                    camera_distance=self.state.controls.camera_distance,
+                    camera_height=self.state.controls.camera_height,
+                    camera_orbit=self.state.controls.camera_orbit,
+                )
                 quit_requested = self.state.controls.quit_requested
             dpg.set_value("fps_text", f"FPS: {metrics.fps:7.2f}")
             dpg.set_value("frame_text", f"{metrics.frame_ms:7.3f} ms")
             dpg.set_value("resolution_text", f"{metrics.width} x {metrics.height}")
             dpg.set_value("tier_text", metrics.active_tier)
-            self._draw_scope(metrics, time.perf_counter())
+            now = time.perf_counter()
+            self._draw_scope(metrics, now)
+            self._draw_gauges(metrics, controls)
+            self._draw_physical_sliders(now)
             if metrics.score is not None and metrics.score != score_seen:
                 details = "\n".join(f"{name}: {fps:.2f} FPS" for name, fps in metrics.tier_results.items())
                 dpg.set_value("score_text", f"Weighted Score: {metrics.score:.2f}\n\n{details}")
@@ -320,12 +414,43 @@ class HudThread(threading.Thread):
             dpg.render_dearpygui_frame()
         dpg.destroy_context()
 
-    @staticmethod
-    def _add_slider_row(label: str, value_tag: str, default: float, minimum: float, maximum: float, callback) -> None:
+    def _add_slider_row(
+        self,
+        label: str,
+        value_tag: str,
+        default: float,
+        minimum: float,
+        maximum: float,
+        callback: Callable[[int, float], None],
+        lamp_color: tuple[int, int, int, int],
+    ) -> None:
+        slider_tag = f"{value_tag}_slider"
+        draw_tag = f"{value_tag}_skin"
         with dpg.group(horizontal=True):
-            dpg.add_text(label)
-            dpg.add_slider_float(label="", default_value=default, min_value=minimum, max_value=maximum, width=230, format="", callback=callback)
+            dpg.add_text(label, color=(214, 226, 228, 255))
+            dpg.add_drawlist(width=188, height=24, tag=draw_tag)
             dpg.add_text(f"{default:5.2f}", tag=value_tag, color=(160, 229, 240, 255))
+        dpg.add_slider_float(
+            label="",
+            tag=slider_tag,
+            default_value=default,
+            min_value=minimum,
+            max_value=maximum,
+            width=338,
+            format="",
+            callback=callback,
+        )
+        self.slider_visuals.append(
+            SliderVisual(
+                label=label,
+                slider_tag=slider_tag,
+                draw_tag=draw_tag,
+                value_tag=value_tag,
+                minimum=minimum,
+                maximum=maximum,
+                lamp_color=lamp_color,
+            )
+        )
 
     @staticmethod
     def _build_theme() -> int:
@@ -359,8 +484,12 @@ class HudThread(threading.Thread):
             return
         dpg.delete_item("hud_scope", children_only=True)
         parent = "hud_scope"
-        dpg.draw_rectangle((0, 0), (392, 126), color=(72, 219, 255, 120), fill=(7, 13, 19, 245), rounding=6, thickness=1, parent=parent)
-        dpg.draw_rectangle((8, 8), (384, 118), color=(255, 175, 72, 45), fill=(10, 22, 30, 210), rounding=4, thickness=1, parent=parent)
+        dpg.draw_rectangle(
+            (0, 0), (392, 126), color=(72, 219, 255, 120), fill=(7, 13, 19, 245), rounding=6, thickness=1, parent=parent
+        )
+        dpg.draw_rectangle(
+            (8, 8), (384, 118), color=(255, 175, 72, 45), fill=(10, 22, 30, 210), rounding=4, thickness=1, parent=parent
+        )
         for x in range(24, 376, 32):
             dpg.draw_line((x, 18), (x, 108), color=(55, 145, 170, 38), thickness=1, parent=parent)
         for y in range(28, 108, 20):
@@ -381,10 +510,153 @@ class HudThread(threading.Thread):
 
         fps_norm = min(metrics.fps / 120.0, 1.0)
         frame_norm = 1.0 - min(metrics.frame_ms / 33.333, 1.0)
-        dpg.draw_rectangle((22, 110), (22 + 150 * fps_norm, 116), color=(78, 225, 255, 190), fill=(78, 225, 255, 165), rounding=2, parent=parent)
-        dpg.draw_rectangle((220, 110), (220 + 150 * frame_norm, 116), color=(255, 176, 77, 190), fill=(255, 176, 77, 150), rounding=2, parent=parent)
+        dpg.draw_rectangle(
+            (22, 110),
+            (22 + 150 * fps_norm, 116),
+            color=(78, 225, 255, 190),
+            fill=(78, 225, 255, 165),
+            rounding=2,
+            parent=parent,
+        )
+        dpg.draw_rectangle(
+            (220, 110),
+            (220 + 150 * frame_norm, 116),
+            color=(255, 176, 77, 190),
+            fill=(255, 176, 77, 150),
+            rounding=2,
+            parent=parent,
+        )
         dpg.draw_circle((348, 66), 24, color=(84, 226, 255, 155), thickness=2, parent=parent)
         dpg.draw_circle((348, 66), 9 + 9 * fps_norm, color=(255, 176, 77, 160), thickness=2, parent=parent)
+
+    @staticmethod
+    def _draw_gauges(metrics: Metrics, controls: Controls) -> None:
+        if not dpg.does_item_exist("hud_gauges"):
+            return
+        parent = "hud_gauges"
+        dpg.delete_item(parent, children_only=True)
+        dpg.draw_rectangle(
+            (0, 0),
+            (392, 92),
+            color=(82, 205, 225, 95),
+            fill=(22, 28, 32, 246),
+            rounding=6,
+            thickness=1,
+            parent=parent,
+        )
+        dpg.draw_rectangle(
+            (12, 10),
+            (380, 82),
+            color=(255, 178, 72, 45),
+            fill=(38, 45, 50, 220),
+            rounding=4,
+            thickness=1,
+            parent=parent,
+        )
+        HudThread._draw_gauge(
+            parent,
+            center=(96, 48),
+            radius=30,
+            value=min(max((controls.mass - 0.6) / (12.0 - 0.6), 0.0), 1.0),
+            label="MASS",
+            color=(86, 229, 255, 230),
+        )
+        HudThread._draw_gauge(
+            parent,
+            center=(294, 48),
+            radius=30,
+            value=min(metrics.frame_ms / 33.333, 1.0),
+            label="FRAME",
+            color=(255, 177, 78, 230),
+        )
+        dpg.draw_line((183, 18), (183, 74), color=(92, 118, 126, 125), thickness=1, parent=parent)
+        dpg.draw_line((192, 18), (192, 74), color=(10, 13, 15, 180), thickness=1, parent=parent)
+
+    @staticmethod
+    def _draw_gauge(
+        parent: str,
+        center: tuple[int, int],
+        radius: int,
+        value: float,
+        label: str,
+        color: tuple[int, int, int, int],
+    ) -> None:
+        cx, cy = center
+        dpg.draw_circle(center, radius, color=(9, 12, 14, 255), fill=(7, 10, 12, 255), parent=parent)
+        dpg.draw_circle(center, radius - 2, color=(168, 188, 190, 125), thickness=2, parent=parent)
+        for tick in range(9):
+            t = tick / 8.0
+            angle = math.radians(220 - 260 * t)
+            inner = radius - (8 if tick % 2 == 0 else 5)
+            outer = radius - 2
+            start = (cx + math.cos(angle) * inner, cy - math.sin(angle) * inner)
+            end = (cx + math.cos(angle) * outer, cy - math.sin(angle) * outer)
+            dpg.draw_line(start, end, color=(210, 225, 220, 145), thickness=1, parent=parent)
+        angle = math.radians(220 - 260 * value)
+        needle = (cx + math.cos(angle) * (radius - 10), cy - math.sin(angle) * (radius - 10))
+        dpg.draw_line(center, needle, color=color, thickness=2, parent=parent)
+        dpg.draw_circle(center, 4, color=(255, 235, 205, 220), fill=(34, 28, 22, 255), parent=parent)
+        dpg.draw_text((cx - 22, cy + 18), label, color=color, size=11, parent=parent)
+
+    def _draw_physical_sliders(self, now: float) -> None:
+        for visual in self.slider_visuals:
+            if not dpg.does_item_exist(visual.draw_tag):
+                continue
+            value = float(dpg.get_value(visual.slider_tag))
+            span = max(visual.maximum - visual.minimum, 1e-6)
+            norm = min(max((value - visual.minimum) / span, 0.0), 1.0)
+            parent = visual.draw_tag
+            dpg.delete_item(parent, children_only=True)
+            dpg.draw_rectangle(
+                (0, 0),
+                (188, 24),
+                color=(165, 182, 184, 95),
+                fill=(47, 54, 58, 245),
+                rounding=5,
+                thickness=1,
+                parent=parent,
+            )
+            dpg.draw_rectangle(
+                (28, 8),
+                (174, 16),
+                color=(4, 7, 9, 255),
+                fill=(5, 8, 10, 255),
+                rounding=4,
+                thickness=1,
+                parent=parent,
+            )
+            dpg.draw_line((34, 12), (168, 12), color=(118, 132, 133, 150), thickness=1, parent=parent)
+            for tick in range(8):
+                x = 36 + tick * 18
+                dpg.draw_line((x, 5), (x, 19), color=(188, 206, 204, 85), thickness=1, parent=parent)
+            lamp = visual.lamp_color
+            pulse = 0.55 + 0.45 * math.sin(now * 2.6 + len(visual.label))
+            dpg.draw_circle(
+                (13, 12),
+                6,
+                color=lamp,
+                fill=(*lamp[:3], int(120 + 80 * pulse)),
+                parent=parent,
+            )
+            dpg.draw_circle(
+                (13, 12),
+                9,
+                color=(*lamp[:3], int(45 + 35 * pulse)),
+                thickness=1,
+                parent=parent,
+            )
+            cap_x = 34 + norm * 134
+            dpg.draw_rectangle(
+                (cap_x - 5, 3),
+                (cap_x + 5, 21),
+                color=(238, 246, 244, 210),
+                fill=(186, 201, 197, 255),
+                rounding=3,
+                thickness=1,
+                parent=parent,
+            )
+            dpg.draw_line((cap_x - 3, 6), (cap_x + 3, 6), color=(255, 255, 255, 100), thickness=1, parent=parent)
+            dpg.draw_line((cap_x - 3, 19), (cap_x + 3, 19), color=(20, 24, 25, 120), thickness=1, parent=parent)
 
     def _set_mass(self, _sender: int, value: float) -> None:
         with self.state.lock:
@@ -656,7 +928,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--smoke-test", type=float, default=0.0, help="Run for N seconds and exit.")
-    parser.add_argument("--tier-duration", type=float, default=None, help="Override benchmark tier duration for testing.")
+    parser.add_argument(
+        "--tier-duration", type=float, default=None, help="Override benchmark tier duration for testing."
+    )
     return parser.parse_args()
 
 

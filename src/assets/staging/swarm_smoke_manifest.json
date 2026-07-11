@@ -1,0 +1,38 @@
+[
+  {
+    "variant": "auto",
+    "filename": "swarm_smoke_auto_1024.png",
+    "payload": {
+      "images": 1,
+      "prompt": "Centered relativistic black hole singularity, luminous rotational photon halo, smooth gravitational lensing arcs, dense pin-sharp starfield, blue-white hot rim with amber plasma undertones, scientific cinematic realism, crisp high-contrast 1024 square benchmark asset.",
+      "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+      "model": "z_image_turbo-Q6_K.gguf",
+      "width": 1024,
+      "height": 1024,
+      "cfgscale": 1.0,
+      "steps": 8,
+      "seed": 424242,
+      "extra_metadata": "{\"asset_task_id\": \"BH-SWARM-SMOKE-1024\", \"asset_component\": \"SwarmUI 1024 nomenclature smoke test\", \"handoff\": \"physics_sandbox/src/assets/staging\", \"explicit_models\": false}"
+    },
+    "success_criteria": "Valid centered 1024x1024 black hole halo asset with sharp starfield."
+  },
+  {
+    "variant": "explicit",
+    "filename": "swarm_smoke_explicit_1024.png",
+    "payload": {
+      "images": 1,
+      "prompt": "Centered relativistic black hole singularity, luminous rotational photon halo, smooth gravitational lensing arcs, dense pin-sharp starfield, blue-white hot rim with amber plasma undertones, scientific cinematic realism, crisp high-contrast 1024 square benchmark asset.",
+      "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+      "model": "z_image_turbo-Q6_K.gguf",
+      "width": 1024,
+      "height": 1024,
+      "cfgscale": 1.0,
+      "steps": 8,
+      "seed": 424242,
+      "extra_metadata": "{\"asset_task_id\": \"BH-SWARM-SMOKE-1024\", \"asset_component\": \"SwarmUI 1024 nomenclature smoke test\", \"handoff\": \"physics_sandbox/src/assets/staging\", \"explicit_models\": true}",
+      "vae": "Flux/UltraFlux-vae",
+      "qwenmodel": "Qwen3-4B-UD-Q6_K_XL.gguf"
+    },
+    "success_criteria": "Valid centered 1024x1024 black hole halo asset with sharp starfield."
+  }
+]
