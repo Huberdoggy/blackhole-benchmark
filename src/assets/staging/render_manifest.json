@@ -1,0 +1,86 @@
+[
+    {
+        "task_id": "BH-GALAXY-001",
+        "handoff_key": "Deep Space Galactic Canvas::deep_space_canvas.png",
+        "component": "Deep Space Galactic Canvas",
+        "filename": "deep_space_canvas.png",
+        "width": 512,
+        "height": 512,
+        "seed": 1679844576,
+        "payload": {
+            "images": 1,
+            "prompt": "Vast deep-space starfield behind a relativistic black hole benchmark, wide cosmic canvas with dense pin-sharp stars, faint nebula dust lanes, subtle gravitational shimmer near center, cinematic high-contrast astrophotography, crisp PNG texture detail.",
+            "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+            "model": "z_image_turbo-Q6_K.gguf",
+            "width": 512,
+            "height": 512,
+            "cfgscale": 1.0,
+            "steps": 8,
+            "seed": 1679844576,
+            "extra_metadata": "{\"asset_task_id\": \"BH-GALAXY-001\", \"asset_handoff_key\": \"Deep Space Galactic Canvas::deep_space_canvas.png\", \"asset_component\": \"Deep Space Galactic Canvas\", \"asset_destination\": \"deep_space_canvas.png\", \"handoff\": \"physics_sandbox/src/assets/staging\"}"
+        }
+    },
+    {
+        "task_id": "BH-PANEL-001",
+        "handoff_key": "Life-like Slider Control Panel::vivid_control_panel.png",
+        "component": "Life-like Slider Control Panel",
+        "filename": "vivid_control_panel.png",
+        "width": 512,
+        "height": 384,
+        "seed": 1570713744,
+        "payload": {
+            "images": 1,
+            "prompt": "Futuristic diagnostics control panel for a black hole raytracing benchmark, vivid glass-and-metal interface surface, illuminated sliders, gauges and telemetry traces, clean modular layout, sharp sci-fi workstation lighting, polished high-fidelity UI texture.",
+            "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+            "model": "z_image_turbo-Q6_K.gguf",
+            "width": 512,
+            "height": 384,
+            "cfgscale": 1.0,
+            "steps": 8,
+            "seed": 1570713744,
+            "extra_metadata": "{\"asset_task_id\": \"BH-PANEL-001\", \"asset_handoff_key\": \"Life-like Slider Control Panel::vivid_control_panel.png\", \"asset_component\": \"Life-like Slider Control Panel\", \"asset_destination\": \"vivid_control_panel.png\", \"handoff\": \"physics_sandbox/src/assets/staging\"}"
+        }
+    },
+    {
+        "task_id": "BH-ACCRETION-001",
+        "handoff_key": "Photorealistic Relativistic Accretion Disk::photoreal_accretion_disk.png",
+        "component": "Photorealistic Relativistic Accretion Disk",
+        "filename": "photoreal_accretion_disk.png",
+        "width": 512,
+        "height": 512,
+        "seed": 613932164,
+        "payload": {
+            "images": 1,
+            "prompt": "Photoreal accretion disk around a black hole, face-on to slight oblique angle, incandescent plasma ring with blue-hot approaching side and deep red retreating side, turbulent thermal emission, dark central horizon, cinematic scientific realism, crisp high-energy detail.",
+            "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+            "model": "z_image_turbo-Q6_K.gguf",
+            "width": 512,
+            "height": 512,
+            "cfgscale": 1.0,
+            "steps": 8,
+            "seed": 613932164,
+            "extra_metadata": "{\"asset_task_id\": \"BH-ACCRETION-001\", \"asset_handoff_key\": \"Photorealistic Relativistic Accretion Disk::photoreal_accretion_disk.png\", \"asset_component\": \"Photorealistic Relativistic Accretion Disk\", \"asset_destination\": \"photoreal_accretion_disk.png\", \"handoff\": \"physics_sandbox/src/assets/staging\"}"
+        }
+    },
+    {
+        "task_id": "BH-SINGULARITY-002",
+        "handoff_key": "Event Horizon / Gravitational Singularity Sphere::high_fidel_singularity.png",
+        "component": "Event Horizon / Gravitational Singularity Sphere",
+        "filename": "high_fidel_singularity.png",
+        "width": 512,
+        "height": 512,
+        "seed": 1904911311,
+        "payload": {
+            "images": 1,
+            "prompt": "High-fidelity black hole singularity and event horizon, centered dark sphere with warped photon ring, strong gravitational lensing arcs, compressed starlight around the rim, dramatic astrophysical lighting, polished benchmark hero asset, razor-sharp contrast.",
+            "negativeprompt": "blurry, low resolution, cartoon, anime, flat colors, compression artifacts",
+            "model": "z_image_turbo-Q6_K.gguf",
+            "width": 512,
+            "height": 512,
+            "cfgscale": 1.0,
+            "steps": 8,
+            "seed": 1904911311,
+            "extra_metadata": "{\"asset_task_id\": \"BH-SINGULARITY-002\", \"asset_handoff_key\": \"Event Horizon / Gravitational Singularity Sphere::high_fidel_singularity.png\", \"asset_component\": \"Event Horizon / Gravitational Singularity Sphere\", \"asset_destination\": \"high_fidel_singularity.png\", \"handoff\": \"physics_sandbox/src/assets/staging\"}"
+        }
+    }
+]
