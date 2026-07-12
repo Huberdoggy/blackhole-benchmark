@@ -5,7 +5,7 @@ Relativistic black hole raytracer and performance benchmark.
 Main render path:
 - pygame creates an OpenGL 4.6 core-profile window.
 - ModernGL compiles and drives the fullscreen GLSL raymarcher.
-- Dear PyGui runs an independent diagnostics/control viewport.
+- GLFW owns an independent OpenGL control window rendered by Skia.
 """
 
 from __future__ import annotations
@@ -15,15 +15,16 @@ import math
 import statistics
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import dearpygui.dearpygui as dpg
+import glfw
 import moderngl
 import numpy as np
 import pygame
+import skia
+from OpenGL import GL
 
 BENCHMARK_TIERS = [
     ("720p", 1280, 720, 10.0, 1.0),
@@ -36,6 +37,8 @@ SPACE_ASSET = ASSET_DIR / "deep_space_canvas.png"
 PANEL_ASSET = ASSET_DIR / "vivid_control_panel.png"
 DISK_ASSET = ASSET_DIR / "photoreal_accretion_disk.png"
 SINGULARITY_ASSET = ASSET_DIR / "high_fidel_singularity.png"
+CONTROL_PANEL_WIDTH = 980
+CONTROL_PANEL_HEIGHT = 620
 
 
 VERTEX_SHADER = """
@@ -273,420 +276,474 @@ class SharedState:
 
 
 @dataclass(frozen=True)
-class SliderVisual:
+class SliderControl:
     label: str
-    slider_tag: str
-    draw_tag: str
-    value_tag: str
+    field_name: str
     minimum: float
     maximum: float
-    lamp_color: tuple[int, int, int, int]
+    x: float
+    y: float
+    width: float
+    accent: tuple[int, int, int]
 
 
 class HudThread(threading.Thread):
     def __init__(self, state: SharedState) -> None:
         super().__init__(daemon=True)
         self.state = state
-        self.slider_visuals: list[SliderVisual] = []
+        self.sliders = [
+            SliderControl("SINGULARITY MASS", "mass", 0.6, 12.0, 72.0, 418.0, 350.0, (77, 225, 255)),
+            SliderControl("DISK INNER RADIUS", "disk_inner", 0.55, 4.5, 72.0, 482.0, 350.0, (255, 178, 78)),
+            SliderControl("DISK OUTER RADIUS", "disk_outer", 3.5, 14.0, 72.0, 546.0, 350.0, (255, 98, 54)),
+            SliderControl("CAMERA DISTANCE", "camera_distance", 4.0, 24.0, 532.0, 418.0, 350.0, (77, 225, 255)),
+            SliderControl("CAMERA HEIGHT", "camera_height", -6.0, 8.0, 532.0, 482.0, 350.0, (180, 232, 214)),
+            SliderControl("CAMERA ORBIT", "camera_orbit", -math.pi, math.pi, 532.0, 546.0, 350.0, (190, 226, 255)),
+        ]
+        self.dragging_slider: Optional[SliderControl] = None
+        self.mouse_pos = (0.0, 0.0)
+        self.frame_history: list[float] = []
+        self.score_seen: Optional[float] = None
+        self.score_dialog_visible = False
+        self.panel_image: Optional[skia.Image] = skia.Image.open(str(PANEL_ASSET)) if PANEL_ASSET.exists() else None
+        self.typeface = skia.Typeface.MakeFromName("DejaVu Sans Mono", skia.FontStyle.Normal())
 
     def run(self) -> None:
-        dpg.create_context()
-        dpg.bind_theme(self._build_theme())
-        with dpg.window(label="Black Hole Diagnostics", tag="hud_window", width=430, height=620):
-            dpg.add_drawlist(width=392, height=126, tag="hud_scope")
-            dpg.add_drawlist(width=392, height=92, tag="hud_gauges")
-            dpg.add_spacer(height=3)
-            with dpg.group(horizontal=True):
-                dpg.add_text("FPS", color=(85, 226, 255, 255))
-                dpg.add_text("--", tag="fps_text")
-                dpg.add_spacer(width=16)
-                dpg.add_text("FRAME", color=(255, 176, 77, 255))
-                dpg.add_text("--", tag="frame_text")
-            with dpg.group(horizontal=True):
-                dpg.add_text("RES", color=(85, 226, 255, 255))
-                dpg.add_text("--", tag="resolution_text")
-                dpg.add_spacer(width=16)
-                dpg.add_text("MODE", color=(255, 176, 77, 255))
-                dpg.add_text("Interactive", tag="tier_text")
-            dpg.add_separator()
-            with dpg.child_window(height=96, border=True):
-                dpg.add_text("BLACK HOLE", color=(85, 226, 255, 255))
-                self._add_slider_row(
-                    "Mass",
-                    "mass_value",
-                    4.0,
-                    0.6,
-                    12.0,
-                    self._set_mass,
-                    (89, 226, 255, 255),
-                )
-            with dpg.child_window(height=128, border=True):
-                dpg.add_text("ACCRETION DISK", color=(255, 176, 77, 255))
-                self._add_slider_row(
-                    "Inner",
-                    "inner_value",
-                    1.55,
-                    0.55,
-                    4.5,
-                    self._set_inner,
-                    (255, 178, 78, 255),
-                )
-                self._add_slider_row(
-                    "Outer",
-                    "outer_value",
-                    7.3,
-                    3.5,
-                    14.0,
-                    self._set_outer,
-                    (255, 106, 64, 255),
-                )
-            with dpg.child_window(height=128, border=True):
-                dpg.add_text("CAMERA", color=(85, 226, 255, 255))
-                self._add_slider_row(
-                    "Distance",
-                    "camera_distance_value",
-                    11.0,
-                    4.0,
-                    24.0,
-                    self._set_camera_distance,
-                    (89, 226, 255, 255),
-                )
-                self._add_slider_row(
-                    "Height",
-                    "camera_height_value",
-                    2.25,
-                    -6.0,
-                    8.0,
-                    self._set_camera_height,
-                    (180, 232, 214, 255),
-                )
-            dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Run Benchmark", width=185, callback=self._request_benchmark)
-                dpg.add_button(label="Quit", width=90, callback=self._request_quit)
+        if not glfw.init():
+            raise RuntimeError("glfw.init() failed for the Skia control panel window.")
+        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+        glfw.window_hint(glfw.STENCIL_BITS, 8)
+        glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
+        window = glfw.create_window(
+            CONTROL_PANEL_WIDTH,
+            CONTROL_PANEL_HEIGHT,
+            "Black Hole Benchmark Control Console",
+            None,
+            None,
+        )
+        if window is None:
+            glfw.terminate()
+            raise RuntimeError("Could not create the Skia control panel OpenGL window.")
 
-        with dpg.window(
-            label="Benchmark Complete", modal=True, show=False, tag="score_modal", no_resize=True, width=390, height=210
-        ):
-            dpg.add_text("", tag="score_text")
-            dpg.add_button(label="Close", callback=lambda: dpg.configure_item("score_modal", show=False))
+        glfw.make_context_current(window)
+        glfw.swap_interval(1)
+        glfw.set_cursor_pos_callback(window, self._on_cursor)
+        glfw.set_mouse_button_callback(window, self._on_mouse_button)
+        glfw.set_key_callback(window, self._on_key)
+        context = skia.GrDirectContext.MakeGL()
 
-        dpg.create_viewport(title="Black Hole Benchmark HUD", width=460, height=680)
-        dpg.setup_dearpygui()
-        dpg.show_viewport()
-
-        score_seen: Optional[float] = None
-        while dpg.is_dearpygui_running():
+        try:
+            while not glfw.window_should_close(window):
+                glfw.poll_events()
+                with self.state.lock:
+                    quit_requested = self.state.controls.quit_requested
+                if quit_requested:
+                    glfw.set_window_should_close(window, True)
+                    break
+                self._render_window(window, context)
+                glfw.swap_buffers(window)
+                time.sleep(1.0 / 120.0)
+        finally:
+            context.abandonContext()
+            glfw.destroy_window(window)
+            glfw.terminate()
             with self.state.lock:
-                metrics = Metrics(
-                    fps=self.state.metrics.fps,
-                    frame_ms=self.state.metrics.frame_ms,
-                    width=self.state.metrics.width,
-                    height=self.state.metrics.height,
-                    active_tier=self.state.metrics.active_tier,
-                    score=self.state.metrics.score,
-                    tier_results=dict(self.state.metrics.tier_results),
-                )
-                controls = Controls(
-                    mass=self.state.controls.mass,
-                    disk_inner=self.state.controls.disk_inner,
-                    disk_outer=self.state.controls.disk_outer,
-                    camera_distance=self.state.controls.camera_distance,
-                    camera_height=self.state.controls.camera_height,
-                    camera_orbit=self.state.controls.camera_orbit,
-                )
-                quit_requested = self.state.controls.quit_requested
-            dpg.set_value("fps_text", f"FPS: {metrics.fps:7.2f}")
-            dpg.set_value("frame_text", f"{metrics.frame_ms:7.3f} ms")
-            dpg.set_value("resolution_text", f"{metrics.width} x {metrics.height}")
-            dpg.set_value("tier_text", metrics.active_tier)
-            now = time.perf_counter()
-            self._draw_scope(metrics, now)
-            self._draw_gauges(metrics, controls)
-            self._draw_physical_sliders(now)
-            if metrics.score is not None and metrics.score != score_seen:
-                details = "\n".join(f"{name}: {fps:.2f} FPS" for name, fps in metrics.tier_results.items())
-                dpg.set_value("score_text", f"Weighted Score: {metrics.score:.2f}\n\n{details}")
-                dpg.configure_item("score_modal", show=True)
-                score_seen = metrics.score
-            if quit_requested:
-                dpg.stop_dearpygui()
-            dpg.render_dearpygui_frame()
-        dpg.destroy_context()
+                self.state.controls.quit_requested = True
 
-    def _add_slider_row(
-        self,
-        label: str,
-        value_tag: str,
-        default: float,
-        minimum: float,
-        maximum: float,
-        callback: Callable[[int, float], None],
-        lamp_color: tuple[int, int, int, int],
-    ) -> None:
-        slider_tag = f"{value_tag}_slider"
-        draw_tag = f"{value_tag}_skin"
-        with dpg.group(horizontal=True):
-            dpg.add_text(label, color=(214, 226, 228, 255))
-            dpg.add_drawlist(width=188, height=24, tag=draw_tag)
-            dpg.add_text(f"{default:5.2f}", tag=value_tag, color=(160, 229, 240, 255))
-        dpg.add_slider_float(
-            label="",
-            tag=slider_tag,
-            default_value=default,
-            min_value=minimum,
-            max_value=maximum,
-            width=338,
-            format="",
-            callback=callback,
+    @staticmethod
+    def _color(r: int, g: int, b: int, a: int = 255) -> int:
+        return skia.ColorSetARGB(a, r, g, b)
+
+    @staticmethod
+    def _paint(color: int, style: skia.Paint.Style = skia.Paint.kFill_Style, stroke_width: float = 1.0) -> skia.Paint:
+        paint = skia.Paint(Color=color, AntiAlias=True)
+        paint.setStyle(style)
+        paint.setStrokeWidth(stroke_width)
+        return paint
+
+    def _font(self, size: float) -> skia.Font:
+        return skia.Font(self.typeface, size)
+
+    def _render_window(self, window: glfw._GLFWwindow, context: skia.GrDirectContext) -> None:
+        fb_width, fb_height = glfw.get_framebuffer_size(window)
+        if fb_width <= 0 or fb_height <= 0:
+            return
+        GL.glViewport(0, 0, fb_width, fb_height)
+        backend_target = skia.GrBackendRenderTarget(
+            fb_width,
+            fb_height,
+            0,
+            8,
+            skia.GrGLFramebufferInfo(0, GL.GL_RGBA8),
         )
-        self.slider_visuals.append(
-            SliderVisual(
-                label=label,
-                slider_tag=slider_tag,
-                draw_tag=draw_tag,
-                value_tag=value_tag,
-                minimum=minimum,
-                maximum=maximum,
-                lamp_color=lamp_color,
+        surface = skia.Surface.MakeFromBackendRenderTarget(
+            context,
+            backend_target,
+            skia.kBottomLeft_GrSurfaceOrigin,
+            skia.kRGBA_8888_ColorType,
+            skia.ColorSpace.MakeSRGB(),
+        )
+        if surface is None:
+            return
+        with self.state.lock:
+            metrics = Metrics(
+                fps=self.state.metrics.fps,
+                frame_ms=self.state.metrics.frame_ms,
+                width=self.state.metrics.width,
+                height=self.state.metrics.height,
+                active_tier=self.state.metrics.active_tier,
+                score=self.state.metrics.score,
+                tier_results=dict(self.state.metrics.tier_results),
             )
+            controls = Controls(
+                mass=self.state.controls.mass,
+                disk_inner=self.state.controls.disk_inner,
+                disk_outer=self.state.controls.disk_outer,
+                camera_distance=self.state.controls.camera_distance,
+                camera_height=self.state.controls.camera_height,
+                camera_orbit=self.state.controls.camera_orbit,
+            )
+        now = time.perf_counter()
+        self.frame_history.append(metrics.frame_ms)
+        self.frame_history = self.frame_history[-180:]
+        if metrics.score is not None and metrics.score != self.score_seen:
+            self.score_seen = metrics.score
+            self.score_dialog_visible = True
+
+        canvas = surface.getCanvas()
+        canvas.clear(self._color(5, 7, 10))
+        canvas.save()
+        canvas.scale(fb_width / CONTROL_PANEL_WIDTH, fb_height / CONTROL_PANEL_HEIGHT)
+        self._draw_console(canvas, metrics, controls, now)
+        if self.score_dialog_visible:
+            self._draw_score_dialog(canvas, metrics)
+        canvas.restore()
+        surface.flushAndSubmit()
+
+    def _draw_console(self, canvas: skia.Canvas, metrics: Metrics, controls: Controls, now: float) -> None:
+        if self.panel_image is not None:
+            source = skia.Rect.MakeWH(self.panel_image.width(), self.panel_image.height())
+            dest = skia.Rect.MakeWH(CONTROL_PANEL_WIDTH, CONTROL_PANEL_HEIGHT)
+            canvas.drawImageRect(self.panel_image, source, dest, skia.SamplingOptions())
+            canvas.drawRect(dest, self._paint(self._color(5, 8, 11, 82)))
+        else:
+            canvas.drawRect(
+                skia.Rect.MakeWH(CONTROL_PANEL_WIDTH, CONTROL_PANEL_HEIGHT),
+                self._paint(self._color(32, 35, 36)),
+            )
+
+        self._draw_outer_frame(canvas)
+        self._draw_screen(canvas, skia.Rect.MakeXYWH(54, 64, 382, 242), "RAYTRACE TELEMETRY")
+        self._draw_screen(canvas, skia.Rect.MakeXYWH(544, 64, 382, 242), "BENCHMARK MATRIX")
+        self._draw_trace(canvas, skia.Rect.MakeXYWH(78, 118, 334, 154), metrics, now)
+        self._draw_metric_stack(canvas, metrics)
+        self._draw_gauge(canvas, (490.0, 207.0), 44.0, (controls.mass - 0.6) / (12.0 - 0.6), "MASS", (77, 225, 255))
+        self._draw_frame_meter(canvas, skia.Rect.MakeXYWH(448, 318, 84, 18), metrics)
+        self._draw_lamps(canvas, metrics)
+        for slider in self.sliders:
+            self._draw_slider(canvas, slider, getattr(controls, slider.field_name), now)
+        self._draw_button(canvas, skia.Rect.MakeXYWH(324, 350, 134, 36), "RESET CAMERA", (178, 214, 220))
+        self._draw_button(canvas, skia.Rect.MakeXYWH(480, 350, 150, 36), "RUN BENCH", (255, 178, 78))
+        self._draw_button(canvas, skia.Rect.MakeXYWH(652, 350, 84, 36), "QUIT", (255, 92, 62))
+
+    def _draw_outer_frame(self, canvas: skia.Canvas) -> None:
+        frame = skia.Rect.MakeXYWH(24, 24, CONTROL_PANEL_WIDTH - 48, CONTROL_PANEL_HEIGHT - 48)
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(frame, 22, 22),
+            self._paint(self._color(190, 198, 193, 92), skia.Paint.kStroke_Style, 2.0),
+        )
+        inset = skia.Rect.MakeXYWH(38, 38, CONTROL_PANEL_WIDTH - 76, CONTROL_PANEL_HEIGHT - 76)
+        canvas.drawRRect(skia.RRect.MakeRectXY(inset, 16, 16), self._paint(self._color(8, 11, 13, 130)))
+
+    def _draw_screen(self, canvas: skia.Canvas, rect: skia.Rect, label: str) -> None:
+        canvas.drawRRect(skia.RRect.MakeRectXY(rect, 10, 10), self._paint(self._color(1, 6, 9, 230)))
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(rect, 10, 10),
+            self._paint(self._color(69, 219, 255, 115), skia.Paint.kStroke_Style, 1.3),
+        )
+        canvas.drawString(
+            label, rect.x() + 18, rect.y() + 31, self._font(14), self._paint(self._color(120, 238, 255, 238))
+        )
+        for x in range(int(rect.x() + 18), int(rect.right() - 8), 28):
+            canvas.drawLine(x, rect.y() + 50, x, rect.bottom() - 18, self._paint(self._color(61, 164, 184, 35)))
+        for y in range(int(rect.y() + 58), int(rect.bottom() - 8), 26):
+            canvas.drawLine(rect.x() + 14, y, rect.right() - 14, y, self._paint(self._color(61, 164, 184, 31)))
+
+    def _draw_trace(self, canvas: skia.Canvas, rect: skia.Rect, metrics: Metrics, now: float) -> None:
+        history = self.frame_history if len(self.frame_history) >= 2 else [metrics.frame_ms for _ in range(32)]
+        path = skia.Path()
+        for index, frame_ms in enumerate(history):
+            x = rect.x() + rect.width() * index / max(len(history) - 1, 1)
+            normalized = min(frame_ms / 34.0, 1.0)
+            wave = math.sin(index * 0.19 + now * 2.2) * 5.0
+            y = rect.bottom() - normalized * (rect.height() - 16.0) + wave
+            if index == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        canvas.drawPath(path, self._paint(self._color(78, 231, 255, 230), skia.Paint.kStroke_Style, 2.3))
+        fps_width = min(metrics.fps / 160.0, 1.0) * (rect.width() - 16)
+        frame_width = max(0.0, 1.0 - min(metrics.frame_ms / 33.333, 1.0)) * (rect.width() - 16)
+        canvas.drawRect(
+            skia.Rect.MakeXYWH(rect.x() + 8, rect.bottom() - 18, fps_width, 4),
+            self._paint(self._color(75, 226, 255, 185)),
+        )
+        canvas.drawRect(
+            skia.Rect.MakeXYWH(rect.x() + 8, rect.bottom() - 10, frame_width, 4),
+            self._paint(self._color(255, 176, 77, 175)),
         )
 
-    @staticmethod
-    def _build_theme() -> int:
-        with dpg.theme() as theme:
-            with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (8, 12, 18, 244))
-                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (10, 17, 25, 232))
-                dpg.add_theme_color(dpg.mvThemeCol_PopupBg, (12, 16, 22, 250))
-                dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 235, 238, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_TextDisabled, (98, 120, 126, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_Border, (53, 178, 205, 115))
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (15, 28, 37, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (24, 57, 70, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (34, 83, 96, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, (78, 225, 255, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, (255, 183, 76, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_Button, (22, 49, 60, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (36, 92, 108, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (210, 126, 43, 255))
-                dpg.add_theme_color(dpg.mvThemeCol_Separator, (67, 174, 198, 120))
-                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 4)
-                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
-                dpg.add_theme_style(dpg.mvStyleVar_GrabRounding, 4)
-                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 14, 12)
-                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 7)
-        return theme
+    def _draw_metric_stack(self, canvas: skia.Canvas, metrics: Metrics) -> None:
+        labels = [
+            ("FPS", f"{metrics.fps:7.2f}", (76, 226, 255)),
+            ("FRAME", f"{metrics.frame_ms:7.3f} ms", (255, 178, 78)),
+            ("RES", f"{metrics.width} x {metrics.height}", (148, 234, 218)),
+            ("MODE", metrics.active_tier.upper(), (255, 98, 54)),
+        ]
+        x = 574
+        y = 120
+        for index, (label, value, color) in enumerate(labels):
+            row_y = y + index * 43
+            canvas.drawString(label, x, row_y, self._font(13), self._paint(self._color(*color, 225)))
+            canvas.drawString(value[:24], x + 92, row_y, self._font(20), self._paint(self._color(225, 236, 232, 238)))
 
-    @staticmethod
-    def _draw_scope(metrics: Metrics, now: float) -> None:
-        if not dpg.does_item_exist("hud_scope"):
-            return
-        dpg.delete_item("hud_scope", children_only=True)
-        parent = "hud_scope"
-        dpg.draw_rectangle(
-            (0, 0), (392, 126), color=(72, 219, 255, 120), fill=(7, 13, 19, 245), rounding=6, thickness=1, parent=parent
-        )
-        dpg.draw_rectangle(
-            (8, 8), (384, 118), color=(255, 175, 72, 45), fill=(10, 22, 30, 210), rounding=4, thickness=1, parent=parent
-        )
-        for x in range(24, 376, 32):
-            dpg.draw_line((x, 18), (x, 108), color=(55, 145, 170, 38), thickness=1, parent=parent)
-        for y in range(28, 108, 20):
-            dpg.draw_line((18, y), (374, y), color=(55, 145, 170, 34), thickness=1, parent=parent)
-        dpg.draw_text((20, 16), "RAYTRACE TELEMETRY", color=(122, 232, 255, 230), size=13, parent=parent)
-        dpg.draw_text((252, 16), metrics.active_tier.upper()[:16], color=(255, 180, 78, 230), size=13, parent=parent)
-
-        points = []
-        phase = now * 3.1
-        frame_factor = min(metrics.frame_ms / 32.0, 1.0)
-        for i in range(92):
-            x = 20 + i * 3.78
-            y = 80 + math.sin(i * 0.21 + phase) * 15 + math.cos(i * 0.075 + phase * 0.7) * 7
-            y += frame_factor * math.sin(i * 0.47 + phase * 1.5) * 8
-            points.append((x, y))
-        dpg.draw_polyline(points, color=(82, 231, 255, 210), thickness=2, parent=parent)
-        dpg.draw_polyline([(x, y + 6) for x, y in points[::2]], color=(255, 154, 58, 115), thickness=1, parent=parent)
-
-        fps_norm = min(metrics.fps / 120.0, 1.0)
-        frame_norm = 1.0 - min(metrics.frame_ms / 33.333, 1.0)
-        dpg.draw_rectangle(
-            (22, 110),
-            (22 + 150 * fps_norm, 116),
-            color=(78, 225, 255, 190),
-            fill=(78, 225, 255, 165),
-            rounding=2,
-            parent=parent,
-        )
-        dpg.draw_rectangle(
-            (220, 110),
-            (220 + 150 * frame_norm, 116),
-            color=(255, 176, 77, 190),
-            fill=(255, 176, 77, 150),
-            rounding=2,
-            parent=parent,
-        )
-        dpg.draw_circle((348, 66), 24, color=(84, 226, 255, 155), thickness=2, parent=parent)
-        dpg.draw_circle((348, 66), 9 + 9 * fps_norm, color=(255, 176, 77, 160), thickness=2, parent=parent)
-
-    @staticmethod
-    def _draw_gauges(metrics: Metrics, controls: Controls) -> None:
-        if not dpg.does_item_exist("hud_gauges"):
-            return
-        parent = "hud_gauges"
-        dpg.delete_item(parent, children_only=True)
-        dpg.draw_rectangle(
-            (0, 0),
-            (392, 92),
-            color=(82, 205, 225, 95),
-            fill=(22, 28, 32, 246),
-            rounding=6,
-            thickness=1,
-            parent=parent,
-        )
-        dpg.draw_rectangle(
-            (12, 10),
-            (380, 82),
-            color=(255, 178, 72, 45),
-            fill=(38, 45, 50, 220),
-            rounding=4,
-            thickness=1,
-            parent=parent,
-        )
-        HudThread._draw_gauge(
-            parent,
-            center=(96, 48),
-            radius=30,
-            value=min(max((controls.mass - 0.6) / (12.0 - 0.6), 0.0), 1.0),
-            label="MASS",
-            color=(86, 229, 255, 230),
-        )
-        HudThread._draw_gauge(
-            parent,
-            center=(294, 48),
-            radius=30,
-            value=min(metrics.frame_ms / 33.333, 1.0),
-            label="FRAME",
-            color=(255, 177, 78, 230),
-        )
-        dpg.draw_line((183, 18), (183, 74), color=(92, 118, 126, 125), thickness=1, parent=parent)
-        dpg.draw_line((192, 18), (192, 74), color=(10, 13, 15, 180), thickness=1, parent=parent)
-
-    @staticmethod
     def _draw_gauge(
-        parent: str,
-        center: tuple[int, int],
-        radius: int,
+        self,
+        canvas: skia.Canvas,
+        center: tuple[float, float],
+        radius: float,
         value: float,
         label: str,
-        color: tuple[int, int, int, int],
+        color: tuple[int, int, int],
     ) -> None:
+        value = min(max(value, 0.0), 1.0)
         cx, cy = center
-        dpg.draw_circle(center, radius, color=(9, 12, 14, 255), fill=(7, 10, 12, 255), parent=parent)
-        dpg.draw_circle(center, radius - 2, color=(168, 188, 190, 125), thickness=2, parent=parent)
-        for tick in range(9):
-            t = tick / 8.0
+        rect = skia.Rect.MakeXYWH(cx - radius, cy - radius, radius * 2, radius * 2)
+        canvas.drawCircle(cx, cy, radius + 10, self._paint(self._color(5, 7, 8, 175)))
+        canvas.drawCircle(cx, cy, radius, self._paint(self._color(12, 17, 18, 240)))
+        canvas.drawArc(rect, 140, 260, False, self._paint(self._color(175, 190, 184, 120), skia.Paint.kStroke_Style, 6))
+        canvas.drawArc(
+            rect, 140, 260 * value, False, self._paint(self._color(*color, 230), skia.Paint.kStroke_Style, 6)
+        )
+        for tick in range(11):
+            t = tick / 10.0
             angle = math.radians(220 - 260 * t)
-            inner = radius - (8 if tick % 2 == 0 else 5)
+            inner = radius - (13 if tick % 2 == 0 else 8)
             outer = radius - 2
-            start = (cx + math.cos(angle) * inner, cy - math.sin(angle) * inner)
-            end = (cx + math.cos(angle) * outer, cy - math.sin(angle) * outer)
-            dpg.draw_line(start, end, color=(210, 225, 220, 145), thickness=1, parent=parent)
+            canvas.drawLine(
+                cx + math.cos(angle) * inner,
+                cy - math.sin(angle) * inner,
+                cx + math.cos(angle) * outer,
+                cy - math.sin(angle) * outer,
+                self._paint(self._color(225, 232, 220, 160), skia.Paint.kStroke_Style, 1.3),
+            )
         angle = math.radians(220 - 260 * value)
-        needle = (cx + math.cos(angle) * (radius - 10), cy - math.sin(angle) * (radius - 10))
-        dpg.draw_line(center, needle, color=color, thickness=2, parent=parent)
-        dpg.draw_circle(center, 4, color=(255, 235, 205, 220), fill=(34, 28, 22, 255), parent=parent)
-        dpg.draw_text((cx - 22, cy + 18), label, color=color, size=11, parent=parent)
+        canvas.drawLine(
+            cx,
+            cy,
+            cx + math.cos(angle) * (radius - 18),
+            cy - math.sin(angle) * (radius - 18),
+            self._paint(self._color(*color, 250), skia.Paint.kStroke_Style, 3.2),
+        )
+        canvas.drawCircle(cx, cy, 7, self._paint(self._color(238, 228, 205, 245)))
+        label_width = self._font(13).measureText(label)
+        canvas.drawString(
+            label, cx - label_width / 2, cy + radius + 28, self._font(13), self._paint(self._color(*color, 235))
+        )
 
-    def _draw_physical_sliders(self, now: float) -> None:
-        for visual in self.slider_visuals:
-            if not dpg.does_item_exist(visual.draw_tag):
-                continue
-            value = float(dpg.get_value(visual.slider_tag))
-            span = max(visual.maximum - visual.minimum, 1e-6)
-            norm = min(max((value - visual.minimum) / span, 0.0), 1.0)
-            parent = visual.draw_tag
-            dpg.delete_item(parent, children_only=True)
-            dpg.draw_rectangle(
-                (0, 0),
-                (188, 24),
-                color=(165, 182, 184, 95),
-                fill=(47, 54, 58, 245),
-                rounding=5,
-                thickness=1,
-                parent=parent,
+    def _draw_lamps(self, canvas: skia.Canvas, metrics: Metrics) -> None:
+        lamps = [
+            ("INTERACTIVE", "Interactive" in metrics.active_tier, 84, 363, (77, 225, 255)),
+            ("720P", "720p" in metrics.active_tier, 222, 363, (120, 238, 180)),
+            ("1080P", "1080p" in metrics.active_tier, 770, 363, (255, 178, 78)),
+            ("4K", "4K" in metrics.active_tier, 870, 363, (255, 96, 58)),
+        ]
+        for label, active, x, y, color in lamps:
+            alpha = 245 if active else 85
+            canvas.drawCircle(x, y, 9, self._paint(self._color(*color, alpha)))
+            ring_alpha = 46 if active else 18
+            canvas.drawCircle(x, y, 15, self._paint(self._color(*color, ring_alpha), skia.Paint.kStroke_Style, 2))
+            canvas.drawString(label, x + 18, y + 5, self._font(12), self._paint(self._color(226, 234, 228, 220)))
+
+    def _draw_frame_meter(self, canvas: skia.Canvas, rect: skia.Rect, metrics: Metrics) -> None:
+        value = min(metrics.frame_ms / 33.333, 1.0)
+        canvas.drawRRect(skia.RRect.MakeRectXY(rect, 6, 6), self._paint(self._color(8, 11, 12, 210)))
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(rect, 6, 6),
+            self._paint(self._color(255, 178, 78, 115), skia.Paint.kStroke_Style, 1.0),
+        )
+        canvas.drawRect(
+            skia.Rect.MakeXYWH(rect.x() + 5, rect.y() + 6, (rect.width() - 10) * value, 5),
+            self._paint(self._color(255, 178, 78, 190)),
+        )
+        label_width = self._font(11).measureText("FRAME")
+        canvas.drawString(
+            "FRAME",
+            rect.x() + rect.width() / 2 - label_width / 2,
+            rect.bottom() + 14,
+            self._font(11),
+            self._paint(self._color(255, 178, 78, 225)),
+        )
+
+    def _draw_slider(self, canvas: skia.Canvas, slider: SliderControl, value: float, now: float) -> None:
+        y = slider.y
+        rail_x = slider.x + 190
+        rail_w = slider.width - 200
+        norm = (value - slider.minimum) / max(slider.maximum - slider.minimum, 1e-6)
+        norm = min(max(norm, 0.0), 1.0)
+        color = slider.accent
+        panel_rect = skia.Rect.MakeXYWH(slider.x, y - 22, slider.width, 54)
+        canvas.drawRRect(skia.RRect.MakeRectXY(panel_rect, 8, 8), self._paint(self._color(9, 12, 13, 168)))
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(panel_rect, 8, 8),
+            self._paint(self._color(*color, 64), skia.Paint.kStroke_Style, 1.0),
+        )
+        pulse = 0.56 + 0.44 * math.sin(now * 2.3 + slider.x * 0.01)
+        canvas.drawCircle(slider.x + 18, y + 3, 7, self._paint(self._color(*color, int(135 + 96 * pulse))))
+        canvas.drawCircle(slider.x + 18, y + 3, 13, self._paint(self._color(*color, 40), skia.Paint.kStroke_Style, 2))
+        canvas.drawString(
+            slider.label, slider.x + 36, y - 1, self._font(12), self._paint(self._color(225, 234, 230, 220))
+        )
+        canvas.drawString(f"{value:6.2f}", slider.x + 36, y + 20, self._font(18), self._paint(self._color(*color, 235)))
+        slot = skia.Rect.MakeXYWH(rail_x, y - 5, rail_w, 12)
+        canvas.drawRRect(skia.RRect.MakeRectXY(slot, 6, 6), self._paint(self._color(3, 5, 6, 245)))
+        canvas.drawRect(
+            skia.Rect.MakeXYWH(rail_x + 4, y - 1, max((rail_w - 8) * norm, 1.0), 4),
+            self._paint(self._color(*color, 180)),
+        )
+        for tick in range(9):
+            tx = rail_x + 8 + (rail_w - 16) * tick / 8
+            canvas.drawLine(
+                tx, y - 12, tx, y + 14, self._paint(self._color(205, 214, 207, 70), skia.Paint.kStroke_Style, 1)
             )
-            dpg.draw_rectangle(
-                (28, 8),
-                (174, 16),
-                color=(4, 7, 9, 255),
-                fill=(5, 8, 10, 255),
-                rounding=4,
-                thickness=1,
-                parent=parent,
+        cap_x = rail_x + 8 + (rail_w - 16) * norm
+        cap = skia.Rect.MakeXYWH(cap_x - 8, y - 18, 16, 38)
+        canvas.drawRRect(skia.RRect.MakeRectXY(cap, 4, 4), self._paint(self._color(211, 219, 211, 250)))
+        canvas.drawLine(
+            cap_x - 4,
+            y - 13,
+            cap_x + 4,
+            y - 13,
+            self._paint(self._color(255, 255, 255, 125), skia.Paint.kStroke_Style, 1),
+        )
+        canvas.drawLine(
+            cap_x - 4, y + 16, cap_x + 4, y + 16, self._paint(self._color(25, 29, 28, 145), skia.Paint.kStroke_Style, 1)
+        )
+
+    def _draw_button(self, canvas: skia.Canvas, rect: skia.Rect, label: str, color: tuple[int, int, int]) -> None:
+        hovering = self._rect_contains(rect, *self.mouse_pos) and not self.score_dialog_visible
+        fill_alpha = 205 if hovering else 165
+        canvas.drawRRect(skia.RRect.MakeRectXY(rect, 8, 8), self._paint(self._color(9, 11, 12, fill_alpha)))
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(rect, 8, 8),
+            self._paint(self._color(*color, 185 if hovering else 105), skia.Paint.kStroke_Style, 1.4),
+        )
+        label_width = self._font(13).measureText(label)
+        canvas.drawString(
+            label,
+            rect.x() + rect.width() / 2 - label_width / 2,
+            rect.y() + 26,
+            self._font(13),
+            self._paint(self._color(*color, 240)),
+        )
+
+    def _draw_score_dialog(self, canvas: skia.Canvas, metrics: Metrics) -> None:
+        canvas.drawRect(
+            skia.Rect.MakeWH(CONTROL_PANEL_WIDTH, CONTROL_PANEL_HEIGHT), self._paint(self._color(0, 0, 0, 154))
+        )
+        rect = skia.Rect.MakeXYWH(285, 165, 410, 288)
+        canvas.drawRRect(skia.RRect.MakeRectXY(rect, 14, 14), self._paint(self._color(7, 10, 12, 245)))
+        canvas.drawRRect(
+            skia.RRect.MakeRectXY(rect, 14, 14),
+            self._paint(self._color(255, 178, 78, 170), skia.Paint.kStroke_Style, 1.8),
+        )
+        canvas.drawString("BENCHMARK COMPLETE", 327, 213, self._font(20), self._paint(self._color(255, 178, 78, 245)))
+        score = metrics.score if metrics.score is not None else 0.0
+        canvas.drawString(
+            f"WEIGHTED SCORE  {score:8.2f}", 327, 263, self._font(23), self._paint(self._color(79, 230, 255, 245))
+        )
+        y = 304
+        for name, fps in metrics.tier_results.items():
+            canvas.drawString(
+                f"{name:<6} {fps:8.2f} FPS", 350, y, self._font(17), self._paint(self._color(226, 236, 230, 235))
             )
-            dpg.draw_line((34, 12), (168, 12), color=(118, 132, 133, 150), thickness=1, parent=parent)
-            for tick in range(8):
-                x = 36 + tick * 18
-                dpg.draw_line((x, 5), (x, 19), color=(188, 206, 204, 85), thickness=1, parent=parent)
-            lamp = visual.lamp_color
-            pulse = 0.55 + 0.45 * math.sin(now * 2.6 + len(visual.label))
-            dpg.draw_circle(
-                (13, 12),
-                6,
-                color=lamp,
-                fill=(*lamp[:3], int(120 + 80 * pulse)),
-                parent=parent,
-            )
-            dpg.draw_circle(
-                (13, 12),
-                9,
-                color=(*lamp[:3], int(45 + 35 * pulse)),
-                thickness=1,
-                parent=parent,
-            )
-            cap_x = 34 + norm * 134
-            dpg.draw_rectangle(
-                (cap_x - 5, 3),
-                (cap_x + 5, 21),
-                color=(238, 246, 244, 210),
-                fill=(186, 201, 197, 255),
-                rounding=3,
-                thickness=1,
-                parent=parent,
-            )
-            dpg.draw_line((cap_x - 3, 6), (cap_x + 3, 6), color=(255, 255, 255, 100), thickness=1, parent=parent)
-            dpg.draw_line((cap_x - 3, 19), (cap_x + 3, 19), color=(20, 24, 25, 120), thickness=1, parent=parent)
-
-    def _set_mass(self, _sender: int, value: float) -> None:
-        with self.state.lock:
-            self.state.controls.mass = float(value)
-        self._set_readout("mass_value", value)
-
-    def _set_inner(self, _sender: int, value: float) -> None:
-        with self.state.lock:
-            self.state.controls.disk_inner = float(value)
-        self._set_readout("inner_value", value)
-
-    def _set_outer(self, _sender: int, value: float) -> None:
-        with self.state.lock:
-            self.state.controls.disk_outer = float(value)
-        self._set_readout("outer_value", value)
-
-    def _set_camera_distance(self, _sender: int, value: float) -> None:
-        with self.state.lock:
-            self.state.controls.camera_distance = float(value)
-        self._set_readout("camera_distance_value", value)
-
-    def _set_camera_height(self, _sender: int, value: float) -> None:
-        with self.state.lock:
-            self.state.controls.camera_height = float(value)
-        self._set_readout("camera_height_value", value)
+            y += 32
+        self._draw_button(canvas, self._score_close_rect(), "CLOSE", (255, 178, 78))
 
     @staticmethod
-    def _set_readout(tag: str, value: float) -> None:
-        if dpg.does_item_exist(tag):
-            dpg.set_value(tag, f"{value:5.2f}")
+    def _score_close_rect() -> skia.Rect:
+        return skia.Rect.MakeXYWH(421, 396, 138, 36)
+
+    @staticmethod
+    def _rect_contains(rect: skia.Rect, x: float, y: float) -> bool:
+        return rect.x() <= x <= rect.right() and rect.y() <= y <= rect.bottom()
+
+    def _on_cursor(self, window: glfw._GLFWwindow, x: float, y: float) -> None:
+        self.mouse_pos = self._map_mouse(window, x, y)
+        if self.dragging_slider is not None:
+            self._set_slider_from_x(self.dragging_slider, self.mouse_pos[0])
+
+    def _on_mouse_button(self, window: glfw._GLFWwindow, button: int, action: int, _mods: int) -> None:
+        if button != glfw.MOUSE_BUTTON_LEFT:
+            return
+        if action == glfw.PRESS:
+            x_raw, y_raw = glfw.get_cursor_pos(window)
+            self.mouse_pos = self._map_mouse(window, x_raw, y_raw)
+            x, y = self.mouse_pos
+            if self.score_dialog_visible:
+                if self._rect_contains(self._score_close_rect(), x, y):
+                    self.score_dialog_visible = False
+                return
+            for slider in self.sliders:
+                if slider.x <= x <= slider.x + slider.width and slider.y - 24 <= y <= slider.y + 28:
+                    self.dragging_slider = slider
+                    self._set_slider_from_x(slider, x)
+                    return
+            self._handle_button_press(x, y)
+        elif action == glfw.RELEASE:
+            self.dragging_slider = None
+
+    def _on_key(self, _window: glfw._GLFWwindow, key: int, _scancode: int, action: int, _mods: int) -> None:
+        if action != glfw.PRESS:
+            return
+        if key == glfw.KEY_ESCAPE:
+            self._request_quit()
+        elif key == glfw.KEY_B:
+            self._request_benchmark()
+
+    def _map_mouse(self, window: glfw._GLFWwindow, x: float, y: float) -> tuple[float, float]:
+        win_width, win_height = glfw.get_window_size(window)
+        mapped_x = x * CONTROL_PANEL_WIDTH / max(win_width, 1)
+        mapped_y = y * CONTROL_PANEL_HEIGHT / max(win_height, 1)
+        return mapped_x, mapped_y
+
+    def _set_slider_from_x(self, slider: SliderControl, x: float) -> None:
+        rail_x = slider.x + 190
+        rail_w = slider.width - 200
+        norm = min(max((x - rail_x - 8) / max(rail_w - 16, 1.0), 0.0), 1.0)
+        value = slider.minimum + norm * (slider.maximum - slider.minimum)
+        self._set_control(slider.field_name, value)
+
+    def _set_control(self, field_name: str, value: float) -> None:
+        with self.state.lock:
+            value = float(value)
+            if field_name == "disk_inner":
+                value = min(value, self.state.controls.disk_outer - 0.4)
+            elif field_name == "disk_outer":
+                value = max(value, self.state.controls.disk_inner + 0.4)
+            setattr(self.state.controls, field_name, value)
+
+    def _handle_button_press(self, x: float, y: float) -> None:
+        if self._rect_contains(skia.Rect.MakeXYWH(324, 350, 134, 36), x, y):
+            with self.state.lock:
+                self.state.controls.camera_distance = 11.0
+                self.state.controls.camera_height = 2.25
+                self.state.controls.camera_orbit = 0.0
+        elif self._rect_contains(skia.Rect.MakeXYWH(480, 350, 150, 36), x, y):
+            self._request_benchmark()
+        elif self._rect_contains(skia.Rect.MakeXYWH(652, 350, 84, 36), x, y):
+            self._request_quit()
 
     def _request_benchmark(self) -> None:
         with self.state.lock:

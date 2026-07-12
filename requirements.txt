@@ -1,0 +1,9 @@
+black==26.5.1
+flake8==7.3.0
+glfw==2.10.0
+moderngl==5.12.0
+numpy==2.4.6
+pygame==2.6.1
+PyOpenGL==3.1.10
+skia-python==144.0.post2
+websocket-client==1.9.0
