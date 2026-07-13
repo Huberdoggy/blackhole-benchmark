@@ -58,9 +58,14 @@ def emit_directory(node: DirectoryNode, dist_dir: Path, lines: list[str], depth:
     for file_path in sorted(node.files, key=lambda item: item.name.lower()):
         rel_path = file_path.relative_to(dist_dir).as_posix()
         component_id = wix_id("cmp", rel_path)
+        registry_name = wix_id("file", rel_path)
         source_path = str(file_path)
         lines.append(f'{indent}  <Component Id="{component_id}" Guid="{component_guid(rel_path)}">')
-        lines.append(f'{indent}    <File Source="{xml_attr(source_path)}" KeyPath="yes" />')
+        lines.append(f'{indent}    <File Source="{xml_attr(source_path)}" />')
+        lines.append(
+            f'{indent}    <RegistryValue Root="HKCU" Key="{xml_attr(REGISTRY_ROOT)}\\InstalledFiles" '
+            f'Name="{registry_name}" Type="integer" Value="1" KeyPath="yes" />'
+        )
         lines.append(f"{indent}  </Component>")
 
     for child in sorted(node.children.values(), key=lambda item: item.name.lower()):
