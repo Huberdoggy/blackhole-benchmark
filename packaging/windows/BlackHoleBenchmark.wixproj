@@ -1,4 +1,4 @@
-<Project Sdk="WixToolset.Sdk/7.0.0">
+<Project Sdk="WixToolset.Sdk/6.0.2">
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <OutputName>BlackHoleBenchmark-$(ProductVersion)-windows-x64</OutputName>
@@ -10,6 +10,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
   </ItemGroup>
 </Project>
