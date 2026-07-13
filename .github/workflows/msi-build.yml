@@ -76,10 +76,23 @@ jobs:
             --clean `
             --onedir `
             --windowed `
+            --additional-hooks-dir packaging/pyinstaller `
             --name BlackHoleBenchmark `
             --icon build/windows/black-hole-benchmark.ico `
             --add-data "src/assets/staging:src/assets/staging" `
             benchmark.py
+
+      - name: Verify bundled GLFW runtime
+        shell: pwsh
+        run: |
+          $glfwDir = Join-Path "dist/BlackHoleBenchmark/_internal" "glfw"
+          $required = @("glfw3.dll", "msvcr120.dll")
+          foreach ($name in $required) {
+            $path = Join-Path $glfwDir $name
+            if (-not (Test-Path $path)) {
+              throw "Missing bundled GLFW runtime dependency: $path"
+            }
+          }
 
       - name: Generate WiX package source
         shell: pwsh
