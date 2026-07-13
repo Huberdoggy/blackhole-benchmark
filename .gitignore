@@ -18,6 +18,7 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+packaging/windows/Product.generated.wxs
 
 .DS_Store
 Thumbs.db

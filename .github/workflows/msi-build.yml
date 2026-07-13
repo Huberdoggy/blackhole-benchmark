@@ -1,0 +1,124 @@
+name: Windows MSI Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-msi:
+    name: Build Windows x64 MSI
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: "pip"
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $refName = "${{ github.ref_name }}"
+          if ($refName -notmatch '^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?') {
+            throw "MSI releases require a numeric tag prefix such as v1.2.3."
+          }
+
+          $major = [int]$Matches[1]
+          $minor = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
+          $patch = if ($Matches[3]) { [int]$Matches[3] } else { 0 }
+
+          if ($major -gt 255 -or $minor -gt 255 -or $patch -gt 65535) {
+            throw "MSI ProductVersion fields are limited to major/minor <= 255 and patch <= 65535."
+          }
+
+          "PRODUCT_VERSION=$major.$minor.$patch" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=$refName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pillow
+
+      - name: Prepare Windows icon
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build/windows | Out-Null
+          $iconScript = @'
+          from pathlib import Path
+          from PIL import Image
+
+          source = Path("src/assets/staging/photoreal_accretion_disk.png")
+          target = Path("build/windows/black-hole-benchmark.ico")
+          if not source.exists():
+              raise SystemExit(f"Icon source missing: {source}")
+
+          image = Image.open(source).convert("RGBA")
+          image.save(target, sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+          '@
+          $iconScript | python -
+
+      - name: Build Windows application bundle
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onedir `
+            --windowed `
+            --name BlackHoleBenchmark `
+            --icon build/windows/black-hole-benchmark.ico `
+            --add-data "src/assets/staging:src/assets/staging" `
+            benchmark.py
+
+      - name: Generate WiX package source
+        shell: pwsh
+        run: |
+          python packaging/windows/generate_wix.py `
+            --dist-dir dist/BlackHoleBenchmark `
+            --output packaging/windows/Product.generated.wxs
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          dotnet build packaging/windows/BlackHoleBenchmark.wixproj `
+            -c Release `
+            -p:ProductVersion="$env:PRODUCT_VERSION" `
+            -p:IconPath="$((Resolve-Path build/windows/black-hole-benchmark.ico).Path)"
+
+          New-Item -ItemType Directory -Force -Path dist/installer | Out-Null
+          $msi = Get-ChildItem packaging/windows/bin -Recurse -Filter *.msi | Select-Object -First 1
+          if (-not $msi) {
+            throw "MSI output was not produced."
+          }
+          Copy-Item $msi.FullName "dist/installer/BlackHoleBenchmark-$env:RELEASE_TAG-windows-x64.msi"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackHoleBenchmark-${{ env.RELEASE_TAG }}-windows-x64-msi
+          path: dist/installer/*.msi
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: ncipollo/release-action@v1.21.0
+        with:
+          tag: ${{ github.ref_name }}
+          name: Black Hole Benchmark ${{ github.ref_name }}
+          artifacts: dist/installer/*.msi
+          artifactContentType: application/x-msi
+          allowUpdates: true
+          replacesArtifacts: true
+          generateReleaseNotes: true
+          immutableCreate: true
+          token: ${{ github.token }}

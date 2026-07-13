@@ -1,0 +1,15 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <OutputName>BlackHoleBenchmark-$(ProductVersion)-windows-x64</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
+    <IconPath Condition="'$(IconPath)' == ''">$(MSBuildProjectDirectory)\black-hole-benchmark.ico</IconPath>
+    <DefineConstants>ProductVersion=$(ProductVersion);IconPath=$(IconPath)</DefineConstants>
+    <SuppressIces>ICE64;ICE91</SuppressIces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>
