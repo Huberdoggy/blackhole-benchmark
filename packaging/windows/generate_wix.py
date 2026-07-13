@@ -106,10 +106,16 @@ def generate_wix(dist_dir: Path) -> str:
         '    <MediaTemplate EmbedCab="yes" />',
         '    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />',
         '    <Property Id="ARPPRODUCTICON" Value="AppIcon" />',
-        '    <Launch Condition="VersionNT64" Message="Black Hole Benchmark requires 64-bit Windows." />',
+        '    <Property Id="WINDOWSBUILDNUMBER">',
         (
-            '    <Launch Condition="VersionNT &gt;= 1000" '
-            'Message="Black Hole Benchmark requires Windows 10 or later. Windows 11 is recommended." />'
+            '      <RegistrySearch Id="WindowsBuildNumberSearch" Root="HKLM" '
+            'Key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" Name="CurrentBuildNumber" Type="raw" />'
+        ),
+        '    </Property>',
+        '    <Launch Condition="Installed OR VersionNT64" Message="Black Hole Benchmark requires 64-bit Windows." />',
+        (
+            '    <Launch Condition="Installed OR (WINDOWSBUILDNUMBER &gt;= 10240)" '
+            'Message="Black Hole Benchmark requires Windows 10 or later." />'
         ),
         '',
         '    <StandardDirectory Id="LocalAppDataFolder">',
