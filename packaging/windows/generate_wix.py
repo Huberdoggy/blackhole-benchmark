@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -13,6 +14,7 @@ PRODUCT_NAME = "Black Hole Benchmark"
 MANUFACTURER = "Physics Sandbox"
 UPGRADE_CODE = "7f7550b6-7d63-4c16-8dc6-4d6a03bbda51"
 REGISTRY_ROOT = r"Software\PhysicsSandbox\BlackHoleBenchmark"
+COMPONENT_GUID_NAMESPACE = uuid.UUID("1d70d2da-493c-4c46-aa2c-12f49a315c17")
 
 
 def xml_attr(value: str) -> str:
@@ -22,6 +24,10 @@ def xml_attr(value: str) -> str:
 def wix_id(prefix: str, value: str) -> str:
     digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def component_guid(value: str) -> str:
+    return str(uuid.uuid5(COMPONENT_GUID_NAMESPACE, value)).upper()
 
 
 class DirectoryNode:
@@ -52,14 +58,9 @@ def emit_directory(node: DirectoryNode, dist_dir: Path, lines: list[str], depth:
     for file_path in sorted(node.files, key=lambda item: item.name.lower()):
         rel_path = file_path.relative_to(dist_dir).as_posix()
         component_id = wix_id("cmp", rel_path)
-        registry_name = wix_id("file", rel_path)
         source_path = str(file_path)
-        lines.append(f'{indent}  <Component Id="{component_id}" Guid="*">')
-        lines.append(f'{indent}    <File Source="{xml_attr(source_path)}" />')
-        lines.append(
-            f'{indent}    <RegistryValue Root="HKCU" Key="{xml_attr(REGISTRY_ROOT)}\\InstalledFiles" '
-            f'Name="{registry_name}" Type="integer" Value="1" KeyPath="yes" />'
-        )
+        lines.append(f'{indent}  <Component Id="{component_id}" Guid="{component_guid(rel_path)}">')
+        lines.append(f'{indent}    <File Source="{xml_attr(source_path)}" KeyPath="yes" />')
         lines.append(f"{indent}  </Component>")
 
     for child in sorted(node.children.values(), key=lambda item: item.name.lower()):
@@ -115,7 +116,10 @@ def generate_wix(dist_dir: Path) -> str:
             "",
             '    <StandardDirectory Id="ProgramMenuFolder">',
             f'      <Directory Id="ApplicationProgramsFolder" Name="{xml_attr(PRODUCT_NAME)}">',
-            '        <Component Id="StartMenuShortcutComponent" Guid="*">',
+            (
+                '        <Component Id="StartMenuShortcutComponent" '
+                f'Guid="{component_guid("shortcut/start-menu")}">'
+            ),
             (
                 f'          <Shortcut Id="StartMenuShortcut" Name="{xml_attr(PRODUCT_NAME)}" '
                 'Description="Run the relativistic black hole benchmark" '
@@ -131,7 +135,10 @@ def generate_wix(dist_dir: Path) -> str:
             "    </StandardDirectory>",
             "",
             '    <StandardDirectory Id="DesktopFolder">',
-            '      <Component Id="DesktopShortcutComponent" Guid="*">',
+            (
+                '      <Component Id="DesktopShortcutComponent" '
+                f'Guid="{component_guid("shortcut/desktop")}">'
+            ),
             (
                 f'        <Shortcut Id="DesktopShortcut" Name="{xml_attr(PRODUCT_NAME)}" '
                 'Description="Run the relativistic black hole benchmark" '
